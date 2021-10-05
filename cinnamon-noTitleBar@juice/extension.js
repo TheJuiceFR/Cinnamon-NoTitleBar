@@ -102,9 +102,6 @@ Meta.MaximizeFlags.BOTH = (Meta.MaximizeFlags.VERTICAL | Meta.MaximizeFlags.HORI
 let changeNWorkspacesEventID = 0;
 let grabEventID = 0;
 let idleTimerID = 0;
-let maximizeEventID = 0;
-let minimizeEventID = 0;
-let tileEventID = 0;
 
 let workspaces = [];
 
@@ -227,16 +224,12 @@ function shouldAffect(win) {
 
     let verdict = true;
 
-    if (!win._maximusDecoratedOriginal) {
-        verdict = false;
-    } else {
-        if (useIgnoreList && ignoreAppsRegexp) {
-            let activeAppName = win.get_wm_class_instance();
-            if (activeAppName) {
-                let ignoredFlag = ignoreAppsRegexp.test(activeAppName);
-                logMessage(`app name = ${activeAppName} ignored = ${ignoredFlag}`);
-                verdict = !ignoredFlag;
-            }
+    if (useIgnoreList && ignoreAppsRegexp) {
+        let activeAppName = win.get_wm_class_instance();
+        if (activeAppName) {
+            let ignoredFlag = ignoreAppsRegexp.test(activeAppName);
+            logMessage(`app name = ${activeAppName} ignored = ${ignoredFlag}`);
+            verdict = !ignoredFlag;
         }
     }
 
@@ -308,16 +301,7 @@ function possiblyRedecorate(win) {
  * not check before undecorating.
  */
 function onMaximize(shellwm, actor) {
-    if (!actor) {
-        return;
-    }
-    let win = actor.get_meta_window();
-    if (!shouldAffect(win)) {
-        return;
-    }
-    // note: window is maximized by this point.
-    logMessage(`onMaximize: ${win.title} [${win.get_wm_class_instance()}]`);
-    setDecorated(win, false);
+    
 }
 
 /** Called when a window is unmaximized.
@@ -331,35 +315,6 @@ function onMaximize(shellwm, actor) {
  */
 function onUnmaximize(shellwm, actor) {
 
-    if (!actor) {
-        return;
-    }
-    let win = actor.meta_window;
-    if (!shouldAffect(win) || win._maximusUndecorated === true) {
-        return;
-    }
-    logMessage(`onUnmaximize: ${win.title} [${win.get_wm_class_instance()}]`);
-    // if the user is unmaximizing by dragging, we wait to decorate until they
-    // have dropped the window, so that we don't force the user to drop
-    // the window prematurely with the redecorate (which stops the grab).
-    if (global.display.get_grab_op() === Meta.GrabOp.MOVING) {
-        if (grabEventID) {
-            // shouldn't happen, but oh well.
-            global.display.disconnect(grabEventID);
-            grabEventID = 0;
-        }
-        grabEventID = global.display.connect("grab-op-end", function () {
-            if (settings.undecorateTile && (win.tile_type == Meta.WindowTileType.TILED || win.tile_type == Meta.WindowTileType.SNAPPED)) {
-                return;
-            } else {
-                possiblyRedecorate(win);
-                global.display.disconnect(grabEventID);
-                grabEventID = 0;
-            }
-        });
-    } else {
-        setDecorated(win, true);
-    }
 }
 
 /** Callback when a window is added in any of the workspaces.
@@ -384,33 +339,14 @@ function onWindowAdded(ws, win) {
     logMessage(
         `onWindowAdded:
             ${win.title}/${win.get_wm_class_instance()}
-            initially decorated? ${win._maximusDecoratedOriginal}`
+            should affect? ${shouldAffect(win)}`
     );
 
-    if (settings.undecorateAll) {
-        setDecorated(win, false);
-    } else if (useAutoUndecorList && autoUndecorAppsRegexp.test(win.get_wm_class_instance())) {
+    if (shouldAffect(win) && win._maximusUndecorated !== true) {
         setDecorated(win, false);
         win._maximusUndecorated = true;
-    } else {
-        if (win._maximusDecoratedOriginal !== undefined) {
-            return;
-        }
-
-        /* Newly-created windows are added to the workspace before
-         * the compositor knows about them: get_compositor_private() is null.
-         * Additionally things like .get_maximized() aren't properly done yet.
-         * (see workspace.js _doAddWindow)
-         */
-        win._maximusDecoratedOriginal = win.decorated !== false || false;
-
-        if (!shouldAffect(win)) {
-            return;
-        }
-
-        // if it is added initially maximized, we undecorate it.
-        possiblyUndecorate(win);
     }
+    
 }
 
 /** Callback whenever the number of workspaces changes.
@@ -461,31 +397,9 @@ function startUndecorating() {
 
     logMessage(`ignore list enabled = ${useIgnoreList}`);
 
-    useAutoUndecorList = settings.useAutoUndecorList;
-    let autoUndecorRegexpStr = settings.autoUndecorAppsList.replace(/,/g, "|");
-    if (useAutoUndecorList && autoUndecorRegexpStr) {
-        try {
-            autoUndecorAppsRegexp = new RegExp(autoUndecorRegexpStr, "i");
-            logMessage(`auto undecor regexp '${autoUndecorRegexpStr}' has been compiled successfully`);
-        } catch(e) {
-            logMessage(`exception on auto undecor regexp '${autoUndecorRegexpStr}' compile: ${e.message}`, true);
-            useAutoUndecorList = false;
-        }
-    } else {
-        useAutoUndecorList = false;
-    }
-
-    logMessage(`auto undecorate enabled = ${useAutoUndecorList}`);
-
     /* Connect events */
     changeNWorkspacesEventID = global.screen.connect("notify::n-workspaces", onChangeNWorkspaces);
 
-    // we must listen to maximize and unmaximize events.
-    maximizeEventID = global.window_manager.connect("maximize", onMaximize);
-    minimizeEventID = global.window_manager.connect("unmaximize", onUnmaximize);
-    if (settings.undecorateTile == true) {
-        tileEventID = global.window_manager.connect("tile", onMaximize);
-    }
     /* this is needed to prevent Metacity from interpreting an attempted drag
      * of an undecorated window as a fullscreen request. Otherwise thunderbird
      * (in particular) has no way to get out of fullscreen, resulting in the user
@@ -528,14 +442,8 @@ function startUndecorating() {
 /** Stop listening to events, restore all windows back to their original
  * decoration state. */
 function stopUndecorating() {
-    if (maximizeEventID) global.window_manager.disconnect(maximizeEventID);
-    if (minimizeEventID) global.window_manager.disconnect(minimizeEventID);
-    if (tileEventID) global.window_manager.disconnect(tileEventID);
     if (changeNWorkspacesEventID) global.screen.disconnect(changeNWorkspacesEventID);
     if (grabEventID) global.display.disconnect(grabEventID);
-    maximizeEventID = 0;
-    minimizeEventID = 0;
-    tileEventID = 0;
     changeNWorkspacesEventID = 0;
     grabEventID = 0;
 
